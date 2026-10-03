@@ -1,0 +1,13 @@
+{
+  "mode": "boat",
+  "selected_camera_name": "USB2.0 PC CAMERA",
+  "selected_camera_index": 1,
+  "tracked_hand": "both",
+  "sensitivity_x": 0.12,
+  "sensitivity_y": 0.12,
+  "sensitivity_z": 0.08,
+  "pinch_threshold": 0.45,
+  "always_on_top": true,
+  "show_gesture_guide": true,
+  "click_hold_seconds": 0.06
+}

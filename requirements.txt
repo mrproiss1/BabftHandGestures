@@ -1,0 +1,4 @@
+opencv-python>=4.8.0
+mediapipe>=0.10.0
+keyboard>=0.13.5
+pygrabber>=0.1
