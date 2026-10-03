@@ -1,5 +1,5 @@
 """
-Unit and integration tests for BABFT Hand Gesture Controller
+Unit and integration tests for BABFT WASD Hand Gesture Controller
 """
 
 import os
@@ -10,33 +10,29 @@ import mediapipe as mp
 from mediapipe.tasks import python
 from mediapipe.tasks.python import vision
 
-# Import module
 from BabftHandGestures import (
-    BabftHandController,
+    BabftWASDController,
     SCANCODE_MAP,
-    CANNON_KEYS,
-    dist2d,
-    dist3d
+    dist2d
 )
 
 def test_config():
     print("Testing config and initialization...")
-    controller = BabftHandController()
-    assert controller.mode in ["boat", "gunner"]
+    controller = BabftWASDController()
     assert controller.active_cam_idx is not None
     assert len(controller.camera_list) > 0
     print(" Config OK!")
 
 def test_scancodes():
-    print("Testing scancodes...")
-    required = ['w', 'a', 's', 'd', 'space', 'f', 'g', 't', 'k', 'l', 'z', 'b', 'v', 'c', 'x', 'n']
+    print("Testing WASD scancodes...")
+    required = ['w', 'a', 's', 'd']
     for k in required:
         assert k in SCANCODE_MAP, f"Missing scancode for {k}"
-    print(" Scancodes OK!")
+    print(" WASD Scancodes OK!")
 
-def test_gestures_on_user_photos():
-    print("Testing classifier on user photos...")
-    controller = BabftHandController()
+def test_wasd_on_user_photos():
+    print("Testing WASD classifier on user photos...")
+    controller = BabftWASDController()
 
     user_img_dir = r"C:\Users\mrproiss1\.gemini\antigravity-ide\brain\a000ab24-f9c5-45a3-b7ea-173158d26c76\.user_uploaded"
     if not os.path.exists(user_img_dir):
@@ -46,7 +42,6 @@ def test_gestures_on_user_photos():
     images = sorted(glob.glob(os.path.join(user_img_dir, "*.jpg")))
     assert len(images) == 5, f"Expected 5 images, found {len(images)}"
 
-    # We need IMAGE running mode detector for static images
     model_path = os.path.join(os.path.dirname(__file__), "hand_landmarker.task")
     detector = vision.HandLandmarker.create_from_options(vision.HandLandmarkerOptions(
         base_options=python.BaseOptions(model_asset_path=model_path),
@@ -54,27 +49,31 @@ def test_gestures_on_user_photos():
         num_hands=1
     ))
 
-    expected_gestures = [
-        "POINT_UP",       # Image 1: Index pointing up
-        "POINT_FORWARD",  # Image 2: Index pointing into camera
-        "PINCH_ACTION",   # Image 3: Thumb & Index pinch
-        "POINT_UP",       # Image 4: Hand angled pointing up-right
-        "POINT_RIGHT",    # Image 5: Hand pointing right
-    ]
+    # User images:
+    # 1: Pointing UP -> 'w'
+    # 2: Pointing FORWARD -> 'w'
+    # 4: Pointing UP-RIGHT -> 'w'
+    # 5: Pointing RIGHT -> 'd'
+    expected_keys = {
+        0: 'w', # Image 1 (Up) -> W
+        1: 'w', # Image 2 (Forward) -> W
+        3: 'w', # Image 4 (Up-Right) -> W
+        4: 'd', # Image 5 (Right) -> D
+    }
 
-    for idx, (img_path, exp) in enumerate(zip(images, expected_gestures)):
-        img = cv2.imread(img_path)
+    for idx, exp_k in expected_keys.items():
+        img = cv2.imread(images[idx])
         rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
         res = detector.detect(mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb))
         assert res.hand_landmarks, f"No landmarks in image {idx+1}"
-        gesture, details = controller.classify_gesture(res.hand_landmarks[0], now=0.0)
-        print(f"  Photo {idx+1}: Got {gesture} (Expected {exp})")
-        assert gesture == exp, f"Photo {idx+1} mismatch: got {gesture}, expected {exp}"
+        key, label = controller.classify_wasd(res.hand_landmarks[0])
+        print(f"  Photo {idx+1}: Got key='{key}', label='{label}' (Expected '{exp_k}')")
+        assert key == exp_k, f"Photo {idx+1} mismatch: got {key}, expected {exp_k}"
 
-    print(" All user gesture images classified accurately!")
+    print(" User gesture images classified into correct WASD keys accurately!")
 
 if __name__ == "__main__":
     test_config()
     test_scancodes()
-    test_gestures_on_user_photos()
-    print("\n ALL TESTS PASSED SUCCESSFULLY!")
+    test_wasd_on_user_photos()
+    print("\n ALL WASD TESTS PASSED SUCCESSFULLY!")
