@@ -6,11 +6,13 @@ Tracks hand gestures via webcam using MediaPipe and sends DirectInput
 hardware scancodes (W, A, S, D) directly to Roblox.
 
 Controls:
-  - Point FORWARD / UP    -> W (Move Forward)
-  - Point LEFT            -> A (Steer Left)
-  - Closed FIST           -> S (Move Backward - no pointing down needed)
-  - Point RIGHT           -> D (Steer Right)
-  - Neutral / Hand Open   -> Release all keys
+  - Point FORWARD / UP         -> W (Move Forward)
+  - Point FORWARD + LEFT (WA)  -> W + A (Diagonal Forward-Left)
+  - Point FORWARD + RIGHT (WD) -> W + D (Diagonal Forward-Right)
+  - Point LEFT                 -> A (Steer Left)
+  - Point RIGHT                -> D (Steer Right)
+  - Closed FIST                -> S (Move Backward - no pointing down needed)
+  - Neutral / Hand Open        -> Release all keys
 """
 
 import os
@@ -188,8 +190,8 @@ DEFAULT_CONFIG = {
     "selected_camera_name": "USB2.0 PC CAMERA",
     "selected_camera_index": 1,
     "tracked_hand": "both",
-    "sensitivity_x": 0.12,
-    "sensitivity_y": 0.12,
+    "sensitivity_x": 0.08,
+    "sensitivity_y": 0.10,
     "sensitivity_z": 0.08,
     "always_on_top": True,
     "show_gesture_guide": True
@@ -224,15 +226,15 @@ class BabftWASDController:
         self.tracked_hand = self.config.get("tracked_hand", "both")
         self.always_on_top = bool(self.config.get("always_on_top", True))
         self.show_gesture_guide = bool(self.config.get("show_gesture_guide", True))
-        self.sensitivity_x = float(self.config.get("sensitivity_x", 0.12))
-        self.sensitivity_y = float(self.config.get("sensitivity_y", 0.12))
+        self.sensitivity_x = float(self.config.get("sensitivity_x", 0.08))
+        self.sensitivity_y = float(self.config.get("sensitivity_y", 0.10))
         self.sensitivity_z = float(self.config.get("sensitivity_z", 0.08))
 
         self.camera_list = get_available_cameras()
         self.active_cam_idx = self._select_initial_camera()
         self.cap = None
 
-        self.current_key = None
+        self.current_keys: List[str] = []
         self.active_direction_label = "NEUTRAL"
         self.window_name = "BABFT Hand WASD Controller"
 
@@ -312,14 +314,16 @@ class BabftWASDController:
                 return landmarks, handedness
         return None, ""
 
-    def classify_wasd(self, lm) -> Tuple[Optional[str], str]:
+    def classify_wasd(self, lm) -> Tuple[List[str], str]:
         """
-        Classifies hand gesture directly to W, A, S, or D:
-          - Point FORWARD (dz < -sensitivity_z) or UP (dy < -sensitivity_y) -> W (Move Forward)
-          - Point LEFT (dx < -sensitivity_x)                               -> A (Steer Left)
-          - Point RIGHT (dx > sensitivity_x)                               -> D (Steer Right)
-          - Closed FIST (or pointing down)                                 -> S (Move Backward)
-          - None                                                           -> Neutral (Release all)
+        Classifies hand gestures with single or simultaneous keys:
+          - Point FORWARD / UP         -> ['w']
+          - Point FORWARD + LEFT (WA)  -> ['w', 'a']
+          - Point FORWARD + RIGHT (WD) -> ['w', 'd']
+          - Point LEFT                 -> ['a']
+          - Point RIGHT                -> ['d']
+          - Closed FIST (or down)      -> ['s']
+          - None                       -> [] (Neutral)
         """
         wrist = lm[0]
         idx_mcp = lm[5]
@@ -333,25 +337,7 @@ class BabftWASDController:
         idx_dz = idx_tip.z - idx_mcp.z
         idx_2d_len = math.hypot(idx_dx, idx_dy) / palm_size
 
-        # 1. Pointing Forward into camera lens (along -Z)
-        if idx_dz < -self.sensitivity_z and idx_2d_len < 0.35:
-            return 'w', "POINT FORWARD (W)"
-
-        # 2. Directional 2D angle pointing (Up, Left, Right, or Down)
-        if idx_2d_len >= 0.30 or abs(idx_dy) > 0.10 or abs(idx_dx) > 0.10:
-            angle_deg = math.degrees(math.atan2(idx_dy, idx_dx))  # 0=Right, -90=Up, 180=Left, 90=Down
-
-            if -140 <= angle_deg <= -45:
-                return 'w', "POINT UP (W)"
-            elif -45 < angle_deg <= 45:
-                return 'd', "POINT RIGHT (D)"
-            elif 45 < angle_deg <= 135:
-                return 's', "POINT DOWN (S)"
-            else:
-                return 'a', "POINT LEFT (A)"
-
-        # 3. Closed FIST detection for Backward (S) - no pointing down required!
-        # When user curls fingers into a fist:
+        # 1. Closed FIST detection for Backward (S) - no pointing down needed!
         if idx_dz > -0.07 and idx_2d_len < 0.35:
             idx_curl = dist2d(idx_tip, wrist) / palm_size
             mid_curl = dist2d(lm[12], wrist) / palm_size
@@ -366,18 +352,50 @@ class BabftWASDController:
                     pinky_curl < 1.05
                 ])
                 if other_curled >= 2:
-                    return 's', "CLOSED FIST (S - BACK)"
+                    return ['s'], "CLOSED FIST (S - BACK)"
 
-        return None, "NEUTRAL"
+        # 2. Pointing Forward into camera lens (along -Z)
+        if idx_dz < -self.sensitivity_z and idx_2d_len < 0.45:
+            if idx_dx < -self.sensitivity_x:
+                return ['w', 'a'], "FORWARD + LEFT (W + A)"
+            elif idx_dx > self.sensitivity_x:
+                return ['w', 'd'], "FORWARD + RIGHT (W + D)"
+            else:
+                return ['w'], "POINT FORWARD (W)"
 
-    def apply_wasd_input(self, target_key: Optional[str]):
-        """Ensures only the target WASD key is pressed, cleanly releasing others."""
+        # 3. 2D Angle-based directional pointing (Supports diagonal combinations)
+        if idx_2d_len >= 0.28 or abs(idx_dy) > 0.08 or abs(idx_dx) > 0.08:
+            angle_deg = math.degrees(math.atan2(idx_dy, idx_dx))  # 0=Right, -90=Up, 180/-180=Left, 90=Down
+
+            # Forward-Left diagonal (-150 to -110 deg)
+            if -150 <= angle_deg < -110:
+                return ['w', 'a'], "FORWARD + LEFT (W + A)"
+            # Pure Forward Up (-110 to -70 deg)
+            elif -110 <= angle_deg <= -70:
+                return ['w'], "POINT UP (W)"
+            # Forward-Right diagonal (-70 to -30 deg)
+            elif -70 < angle_deg < -30:
+                return ['w', 'd'], "FORWARD + RIGHT (W + D)"
+            # Pure Right (-30 to +40 deg)
+            elif -30 <= angle_deg <= 40:
+                return ['d'], "POINT RIGHT (D)"
+            # Down / Backward (+40 to +140 deg)
+            elif 40 < angle_deg <= 140:
+                return ['s'], "POINT DOWN (S)"
+            # Pure Left
+            else:
+                return ['a'], "POINT LEFT (A)"
+
+        return [], "NEUTRAL"
+
+    def apply_wasd_input(self, target_keys: List[str]):
+        """Ensures all target WASD keys are pressed, cleanly releasing others."""
         for k in ['w', 'a', 's', 'd']:
-            if k == target_key:
+            if k in target_keys:
                 press_key(k)
             else:
                 release_key(k)
-        self.current_key = target_key
+        self.current_keys = target_keys
 
     def draw_hud(self, frame: np.ndarray, landmarks, handedness: str, fps: float):
         h, w, _ = frame.shape
@@ -414,7 +432,7 @@ class BabftWASDController:
                     cv2.circle(frame, pt, 4, (0, 140, 255), -1)
 
             # Draw Index Aim Vector if pointing
-            if self.current_key in ['w', 'a', 'd']:
+            if any(k in self.current_keys for k in ['w', 'a', 'd']):
                 idx_base = (int(landmarks[5].x * w), int(landmarks[5].y * h))
                 idx_tip = (int(landmarks[8].x * w), int(landmarks[8].y * h))
                 cv2.arrowedLine(frame, idx_base, idx_tip, (0, 255, 255), 2, tipLength=0.25)
@@ -422,15 +440,17 @@ class BabftWASDController:
         # Minimal Gesture Guide Card (Right Side)
         if self.show_gesture_guide:
             guide_items = [
-                ("W", "Point UP / FWD", "Move Forward"),
-                ("A", "Point LEFT",     "Steer Left"),
-                ("S", "Closed FIST",    "Move Backward"),
-                ("D", "Point RIGHT",    "Steer Right"),
+                ("W",       "Point FORWARD / UP", "Forward"),
+                ("W + A",   "Point FWD + LEFT",   "Forward-Left"),
+                ("W + D",   "Point FWD + RIGHT",  "Forward-Right"),
+                ("A",       "Point LEFT",         "Steer Left"),
+                ("D",       "Point RIGHT",        "Steer Right"),
+                ("S",       "Closed FIST",        "Backward"),
             ]
-            gw = 175
-            gh = len(guide_items) * 26 + 32
+            gw = 185
+            gh = len(guide_items) * 24 + 32
             gx = w - gw - 12
-            gy = 52
+            gy = 50
 
             card_bg = frame.copy()
             cv2.rectangle(card_bg, (gx, gy), (gx + gw, gy + gh), (15, 15, 15), -1)
@@ -439,16 +459,29 @@ class BabftWASDController:
             cv2.putText(frame, "WASD CONTROLS", (gx + 12, gy + 18), cv2.FONT_HERSHEY_SIMPLEX, 0.42, (180, 240, 180), 1)
 
             for i, (k_tag, pose_desc, act_desc) in enumerate(guide_items):
-                iy = gy + 38 + i * 26
-                is_active = (self.current_key == k_tag.lower())
+                iy = gy + 38 + i * 24
+                # Check if this guide row matches active keys
+                target_match = False
+                if k_tag == "W" and self.current_keys == ['w']:
+                    target_match = True
+                elif k_tag == "W + A" and set(self.current_keys) == {'w', 'a'}:
+                    target_match = True
+                elif k_tag == "W + D" and set(self.current_keys) == {'w', 'd'}:
+                    target_match = True
+                elif k_tag == "A" and self.current_keys == ['a']:
+                    target_match = True
+                elif k_tag == "D" and self.current_keys == ['d']:
+                    target_match = True
+                elif k_tag == "S" and self.current_keys == ['s']:
+                    target_match = True
 
-                if is_active:
-                    cv2.rectangle(frame, (gx + 4, iy - 14), (gx + gw - 4, iy + 8), (0, 180, 80), -1)
+                if target_match:
+                    cv2.rectangle(frame, (gx + 4, iy - 13), (gx + gw - 4, iy + 7), (0, 180, 80), -1)
                     col = (0, 0, 0)
                 else:
                     col = (220, 220, 220)
 
-                cv2.putText(frame, f"[{k_tag}] {pose_desc}", (gx + 8, iy), cv2.FONT_HERSHEY_SIMPLEX, 0.38, col, 1)
+                cv2.putText(frame, f"[{k_tag}] {pose_desc}", (gx + 8, iy), cv2.FONT_HERSHEY_SIMPLEX, 0.36, col, 1)
 
         # Bottom Bar: Active Gesture and WASD Virtual Keys
         bot_overlay = frame.copy()
@@ -456,13 +489,13 @@ class BabftWASDController:
         cv2.addWeighted(bot_overlay, 0.85, frame, 0.15, 0, frame)
 
         # Status text
-        cv2.putText(frame, f"ACTION: {self.active_direction_label}", (15, h - 22), cv2.FONT_HERSHEY_SIMPLEX, 0.60, (255, 255, 255), 2)
+        cv2.putText(frame, f"ACTION: {self.active_direction_label}", (15, h - 22), cv2.FONT_HERSHEY_SIMPLEX, 0.58, (255, 255, 255), 2)
 
-        # WASD Key Badges
+        # WASD Key Badges (Lights up multiple keys when active together)
         wasd_keys = ['W', 'A', 'S', 'D']
         bx = w - 20
         for k in reversed(wasd_keys):
-            is_active = (self.current_key == k.lower())
+            is_active = (k.lower() in self.current_keys)
             bg_col = (0, 220, 80) if is_active else (40, 40, 40)
             txt_col = (0, 0, 0) if is_active else (160, 160, 160)
             bx -= 45
@@ -489,11 +522,13 @@ class BabftWASDController:
         print("  BABFT WASD Hand Controller Started Successfully!")
         print("========================================================")
         print("Controls:")
-        print("  Point FORWARD / UP -> W (Move Forward)")
-        print("  Point LEFT         -> A (Steer Left)")
-        print("  Closed FIST        -> S (Move Backward - no pointing down)")
-        print("  Point RIGHT        -> D (Steer Right)")
-        print("  Rest / Open Hand   -> Neutral (Release all keys)")
+        print("  Point FORWARD / UP         -> W (Move Forward)")
+        print("  Point FORWARD + LEFT (WA)  -> W + A (Diagonal Forward-Left)")
+        print("  Point FORWARD + RIGHT (WD) -> W + D (Diagonal Forward-Right)")
+        print("  Point LEFT                 -> A (Steer Left)")
+        print("  Closed FIST                -> S (Move Backward - no pointing down)")
+        print("  Point RIGHT                -> D (Steer Right)")
+        print("  Rest / Open Hand           -> Neutral (Release all keys)")
         print("\nHotkeys:")
         print("  [H]     - Switch Tracked Hand (Both / Right / Left)")
         print("  [T]     - Toggle Always-On-Top Window")
@@ -528,12 +563,12 @@ class BabftWASDController:
                 landmarks, handedness = self.get_tracked_hand_landmarks(det_res)
 
                 if landmarks:
-                    target_key, label = self.classify_wasd(landmarks)
+                    target_keys, label = self.classify_wasd(landmarks)
                     self.active_direction_label = label
-                    self.apply_wasd_input(target_key)
+                    self.apply_wasd_input(target_keys)
                 else:
                     self.active_direction_label = "NO HAND DETECTED"
-                    self.apply_wasd_input(None)
+                    self.apply_wasd_input([])
 
                 self.draw_hud(frame, landmarks, handedness, fps)
 

@@ -50,15 +50,15 @@ def test_wasd_on_user_photos():
     ))
 
     # User images:
-    # 1: Pointing UP -> 'w'
-    # 2: Pointing FORWARD -> 'w'
-    # 4: Pointing UP-RIGHT -> 'w'
-    # 5: Pointing RIGHT -> 'd'
+    # 1: Pointing UP -> ['w']
+    # 2: Pointing FORWARD -> ['w']
+    # 4: Pointing FORWARD + RIGHT together -> ['w', 'd']
+    # 5: Pointing RIGHT -> ['d']
     expected_keys = {
-        0: 'w', # Image 1 (Up) -> W
-        1: 'w', # Image 2 (Forward) -> W
-        3: 'w', # Image 4 (Up-Right) -> W
-        4: 'd', # Image 5 (Right) -> D
+        0: ['w'],       # Image 1 (Up) -> W
+        1: ['w'],       # Image 2 (Forward) -> W
+        3: ['w', 'd'],  # Image 4 (Forward + Right together) -> W + D
+        4: ['d'],       # Image 5 (Pure Right) -> D
     }
 
     for idx, exp_k in expected_keys.items():
@@ -66,11 +66,11 @@ def test_wasd_on_user_photos():
         rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
         res = detector.detect(mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb))
         assert res.hand_landmarks, f"No landmarks in image {idx+1}"
-        key, label = controller.classify_wasd(res.hand_landmarks[0])
-        print(f"  Photo {idx+1}: Got key='{key}', label='{label}' (Expected '{exp_k}')")
-        assert key == exp_k, f"Photo {idx+1} mismatch: got {key}, expected {exp_k}"
+        keys, label = controller.classify_wasd(res.hand_landmarks[0])
+        print(f"  Photo {idx+1}: Got keys={keys}, label='{label}' (Expected {exp_k})")
+        assert keys == exp_k, f"Photo {idx+1} mismatch: got {keys}, expected {exp_k}"
 
-    print(" User gesture images classified into correct WASD keys accurately!")
+    print(" User gesture images classified into correct WASD keys and combos accurately!")
 
 if __name__ == "__main__":
     test_config()

@@ -6,11 +6,13 @@ A streamlined, real-time computer-vision hand tracker for Roblox: Build A Boat F
 
 ## Hand Gestures & WASD Mapping
 
-| Hand Gesture | Key Pressed | Roblox Action | Notes |
+| Hand Gesture | Key Sent to Roblox | Roblox Action | Description |
 | :--- | :---: | :--- | :--- |
-| **Point FORWARD / UP** | **`W`** | Move Forward / Throttle | Point index into camera or upward |
-| **Point LEFT** | **`A`** | Steer Left | Point index finger to the left |
-| **Point RIGHT** | **`D`** | Steer Right | Point index finger to the right |
+| **Point FORWARD / UP** | **`W`** | Move Forward | Point index into camera or straight up |
+| **Point FWD + LEFT** | **`W + A`** | Forward + Steer Left | Point diagonally forward and to the left |
+| **Point FWD + RIGHT** | **`W + D`** | Forward + Steer Right | Point diagonally forward and to the right |
+| **Point LEFT** | **`A`** | Steer Left | Point index finger horizontally left |
+| **Point RIGHT** | **`D`** | Steer Right | Point index finger horizontally right |
 | **Closed FIST** | **`S`** | Move Backward / Reverse | Curl fingers into a fist (no wrist bending down) |
 | **Open / Resting Hand** | *None* | Release all keys | Neutral relaxed position |
 
@@ -19,9 +21,9 @@ A streamlined, real-time computer-vision hand tracker for Roblox: Build A Boat F
 ## Clean On-Screen HUD
 
 - **Minimal Header**: Clean title and FPS counter without button boxes or camera name clutter.
-- **Visual Action Status**: Displays active direction and glowing virtual `[W]`, `[A]`, `[S]`, `[D]` badges at the bottom.
+- **Visual Action Status**: Displays active direction and glowing virtual `[W]`, `[A]`, `[S]`, `[D]` badges at the bottom (supports multiple keys active simultaneously).
 - **Hand Skeleton**: Real-time colored bone tracking and pointing aim vector.
-- **Controls Reference Card**: Compact overlay on the right showing the 4 WASD actions (toggle with `[G]`).
+- **Controls Reference Card**: Compact overlay on the right showing the WASD single and combo actions (toggle with `[G]`).
 
 ---
 
@@ -51,4 +53,5 @@ python BabftHandGestures.py
 
 ## Technical Details
 - **DirectInput Hardware Scancodes**: Utilizes Windows Win32 `user32.SendInput` with `KEYEVENTF_SCANCODE` (`0x11` for W, `0x1E` for A, `0x1F` for S, `0x20` for D) for 100% reliable input capture in Roblox without being blocked by anti-cheat.
+- **Simultaneous Key Dispatch**: Supports dual-key combinations (`W + A` and `W + D`) held down concurrently when steering while moving forward.
 - **Automatic Key Release**: All keys are safely released when your hand leaves the camera frame or when the program closes.
