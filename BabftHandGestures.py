@@ -2,13 +2,13 @@
 Roblox Build A Boat Hand Gesture Controller (BABFT - Pure WASD)
 ==============================================================
 A clean, real-time computer vision controller for Roblox Build A Boat.
-Tracks hand pointing gestures via webcam using MediaPipe and sends DirectInput
+Tracks hand gestures via webcam using MediaPipe and sends DirectInput
 hardware scancodes (W, A, S, D) directly to Roblox.
 
 Controls:
   - Point FORWARD / UP    -> W (Move Forward)
   - Point LEFT            -> A (Steer Left)
-  - Point DOWN            -> S (Move Backward)
+  - Closed FIST           -> S (Move Backward - no pointing down needed)
   - Point RIGHT           -> D (Steer Right)
   - Neutral / Hand Open   -> Release all keys
 """
@@ -22,7 +22,7 @@ import atexit
 import ctypes
 import subprocess
 from ctypes import wintypes
-from typing import Dict, List, Tuple
+from typing import Dict, List, Tuple, Optional
 
 # --- DEPENDENCIES CHECK ---
 REQUIRED_PACKAGES = [
@@ -234,9 +234,6 @@ class BabftWASDController:
 
         self.current_key = None
         self.active_direction_label = "NEUTRAL"
-        self.show_cam_dropdown = False
-        self.cam_dropdown_rects: List[Tuple[int, Tuple[int, int, int, int]]] = []
-        self.ui_buttons: Dict[str, Tuple[int, int, int, int]] = {}
         self.window_name = "BABFT Hand WASD Controller"
 
         if not os.path.exists(MODEL_FILE):
@@ -302,41 +299,6 @@ class BabftWASDController:
         except Exception as e:
             print(f"Always-on-top error: {e}")
 
-    def on_mouse(self, event, x, y, flags, param):
-        if event != cv2.EVENT_LBUTTONDOWN:
-            return
-
-        if self.show_cam_dropdown:
-            for cam_idx, (rx, ry, rw, rh) in self.cam_dropdown_rects:
-                if rx <= x <= rx + rw and ry <= y <= ry + rh:
-                    self.start_camera(cam_idx)
-                    self.show_cam_dropdown = False
-                    return
-            self.show_cam_dropdown = False
-            return
-
-        for btn_id, (bx, by, bw, bh) in self.ui_buttons.items():
-            if bx <= x <= bx + bw and by <= y <= by + bh:
-                if btn_id == "cam":
-                    self.camera_list = get_available_cameras()
-                    self.show_cam_dropdown = not self.show_cam_dropdown
-                elif btn_id == "hand":
-                    order = ["both", "right", "left"]
-                    next_idx = (order.index(self.tracked_hand) + 1) % len(order)
-                    self.tracked_hand = order[next_idx]
-                    self.config["tracked_hand"] = self.tracked_hand
-                    save_config(self.config)
-                elif btn_id == "topmost":
-                    self.always_on_top = not self.always_on_top
-                    self.config["always_on_top"] = self.always_on_top
-                    save_config(self.config)
-                    self.apply_always_on_top()
-                elif btn_id == "guide":
-                    self.show_gesture_guide = not self.show_gesture_guide
-                    self.config["show_gesture_guide"] = self.show_gesture_guide
-                    save_config(self.config)
-                break
-
     def get_tracked_hand_landmarks(self, detection_res):
         if not detection_res.hand_landmarks:
             return None, ""
@@ -352,11 +314,11 @@ class BabftWASDController:
 
     def classify_wasd(self, lm) -> Tuple[Optional[str], str]:
         """
-        Classifies hand pointing gesture directly to W, A, S, or D:
+        Classifies hand gesture directly to W, A, S, or D:
           - Point FORWARD (dz < -sensitivity_z) or UP (dy < -sensitivity_y) -> W (Move Forward)
           - Point LEFT (dx < -sensitivity_x)                               -> A (Steer Left)
-          - Point DOWN (dy > sensitivity_y)                                -> S (Move Backward)
           - Point RIGHT (dx > sensitivity_x)                               -> D (Steer Right)
+          - Closed FIST (or pointing down)                                 -> S (Move Backward)
           - None                                                           -> Neutral (Release all)
         """
         wrist = lm[0]
@@ -375,7 +337,7 @@ class BabftWASDController:
         if idx_dz < -self.sensitivity_z and idx_2d_len < 0.35:
             return 'w', "POINT FORWARD (W)"
 
-        # 2. Directional 2D angle pointing
+        # 2. Directional 2D angle pointing (Up, Left, Right, or Down)
         if idx_2d_len >= 0.30 or abs(idx_dy) > 0.10 or abs(idx_dx) > 0.10:
             angle_deg = math.degrees(math.atan2(idx_dy, idx_dx))  # 0=Right, -90=Up, 180=Left, 90=Down
 
@@ -387,6 +349,24 @@ class BabftWASDController:
                 return 's', "POINT DOWN (S)"
             else:
                 return 'a', "POINT LEFT (A)"
+
+        # 3. Closed FIST detection for Backward (S) - no pointing down required!
+        # When user curls fingers into a fist:
+        if idx_dz > -0.07 and idx_2d_len < 0.35:
+            idx_curl = dist2d(idx_tip, wrist) / palm_size
+            mid_curl = dist2d(lm[12], wrist) / palm_size
+            ring_curl = dist2d(lm[16], wrist) / palm_size
+            pinky_curl = dist2d(lm[20], wrist) / palm_size
+            idx_to_mcp = dist2d(idx_tip, idx_mcp) / palm_size
+
+            if idx_to_mcp < 0.45 or idx_curl < 1.05:
+                other_curled = sum([
+                    mid_curl < 1.05,
+                    ring_curl < 1.05,
+                    pinky_curl < 1.05
+                ])
+                if other_curled >= 2:
+                    return 's', "CLOSED FIST (S - BACK)"
 
         return None, "NEUTRAL"
 
@@ -402,47 +382,14 @@ class BabftWASDController:
     def draw_hud(self, frame: np.ndarray, landmarks, handedness: str, fps: float):
         h, w, _ = frame.shape
 
-        # Semi-transparent top navigation bar
+        # Clean top bar without visual button clutter
         overlay = frame.copy()
-        cv2.rectangle(overlay, (0, 0), (w, 50), (20, 20, 20), -1)
+        cv2.rectangle(overlay, (0, 0), (w, 42), (18, 18, 18), -1)
         cv2.addWeighted(overlay, 0.85, frame, 0.15, 0, frame)
 
-        # Title
-        cv2.putText(frame, "BUILD A BOAT WASD", (14, 32), cv2.FONT_HERSHEY_SIMPLEX, 0.60, (0, 220, 100), 2)
-        (tw, _), _ = cv2.getTextSize("BUILD A BOAT WASD", cv2.FONT_HERSHEY_SIMPLEX, 0.60, 2)
-
-        # Camera Button
-        cam_name = dict(self.camera_list).get(self.active_cam_idx, f"Cam {self.active_cam_idx}")
-        if len(cam_name) > 16:
-            cam_name = cam_name[:14] + ".."
-        cam_text = f"Cam: {cam_name}"
-        (cw, _), _ = cv2.getTextSize(cam_text, cv2.FONT_HERSHEY_SIMPLEX, 0.46, 1)
-        cx1 = tw + 28
-        cv2.rectangle(frame, (cx1, 10), (cx1 + cw + 14, 40), (50, 50, 50), -1)
-        cv2.rectangle(frame, (cx1, 10), (cx1 + cw + 14, 40), (180, 180, 180), 1)
-        cv2.putText(frame, cam_text, (cx1 + 7, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.46, (255, 255, 255), 1)
-        self.ui_buttons["cam"] = (cx1, 10, cw + 14, 30)
-
-        # Hand Selector Button
-        hand_text = f"Hand: {self.tracked_hand.title()} [H]"
-        (hw, _), _ = cv2.getTextSize(hand_text, cv2.FONT_HERSHEY_SIMPLEX, 0.46, 1)
-        hx1 = cx1 + cw + 20
-        cv2.rectangle(frame, (hx1, 10), (hx1 + hw + 14, 40), (50, 50, 50), -1)
-        cv2.rectangle(frame, (hx1, 10), (hx1 + hw + 14, 40), (180, 180, 180), 1)
-        cv2.putText(frame, hand_text, (hx1 + 7, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.46, (220, 220, 220), 1)
-        self.ui_buttons["hand"] = (hx1, 10, hw + 14, 30)
-
-        # Pin On Top Button
-        pin_text = f"Pin: {'ON' if self.always_on_top else 'OFF'} [T]"
-        (pw, _), _ = cv2.getTextSize(pin_text, cv2.FONT_HERSHEY_SIMPLEX, 0.46, 1)
-        px1 = hx1 + hw + 20
-        cv2.rectangle(frame, (px1, 10), (px1 + pw + 14, 40), (50, 50, 50), -1)
-        cv2.rectangle(frame, (px1, 10), (px1 + pw + 14, 40), (180, 180, 180), 1)
-        cv2.putText(frame, pin_text, (px1 + 7, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.46, (255, 255, 100), 1)
-        self.ui_buttons["topmost"] = (px1, 10, pw + 14, 30)
-
-        # FPS
-        cv2.putText(frame, f"{int(fps)} FPS", (w - 75, 32), cv2.FONT_HERSHEY_SIMPLEX, 0.52, (160, 160, 160), 1)
+        # Simple title and FPS counter
+        cv2.putText(frame, "BUILD A BOAT WASD", (14, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.58, (0, 220, 100), 2)
+        cv2.putText(frame, f"{int(fps)} FPS", (w - 75, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.50, (150, 150, 150), 1)
 
         # Skeleton Tracking Lines
         if landmarks:
@@ -461,28 +408,29 @@ class BabftWASDController:
 
             for idx, p in enumerate(landmarks):
                 pt = (int(p.x * w), int(p.y * h))
-                if idx == 8: # Index Tip
+                if idx == 8:  # Index Tip
                     cv2.circle(frame, pt, 8, (0, 255, 255), -1)
                 else:
                     cv2.circle(frame, pt, 4, (0, 140, 255), -1)
 
-            # Draw Index Aim Vector
-            idx_base = (int(landmarks[5].x * w), int(landmarks[5].y * h))
-            idx_tip = (int(landmarks[8].x * w), int(landmarks[8].y * h))
-            cv2.arrowedLine(frame, idx_base, idx_tip, (0, 255, 255), 2, tipLength=0.25)
+            # Draw Index Aim Vector if pointing
+            if self.current_key in ['w', 'a', 'd']:
+                idx_base = (int(landmarks[5].x * w), int(landmarks[5].y * h))
+                idx_tip = (int(landmarks[8].x * w), int(landmarks[8].y * h))
+                cv2.arrowedLine(frame, idx_base, idx_tip, (0, 255, 255), 2, tipLength=0.25)
 
-        # Gesture Guide Card (Right Side)
+        # Minimal Gesture Guide Card (Right Side)
         if self.show_gesture_guide:
             guide_items = [
                 ("W", "Point UP / FWD", "Move Forward"),
                 ("A", "Point LEFT",     "Steer Left"),
-                ("S", "Point DOWN",     "Move Backward"),
+                ("S", "Closed FIST",    "Move Backward"),
                 ("D", "Point RIGHT",    "Steer Right"),
             ]
             gw = 175
             gh = len(guide_items) * 26 + 32
             gx = w - gw - 12
-            gy = 60
+            gy = 52
 
             card_bg = frame.copy()
             cv2.rectangle(card_bg, (gx, gy), (gx + gw, gy + gh), (15, 15, 15), -1)
@@ -517,32 +465,13 @@ class BabftWASDController:
             is_active = (self.current_key == k.lower())
             bg_col = (0, 220, 80) if is_active else (40, 40, 40)
             txt_col = (0, 0, 0) if is_active else (160, 160, 160)
-            (kw, _), _ = cv2.getTextSize(k, cv2.FONT_HERSHEY_SIMPLEX, 0.55, 2)
             bx -= 45
             cv2.rectangle(frame, (bx, h - 45), (bx + 36, h - 12), bg_col, -1)
             cv2.rectangle(frame, (bx, h - 45), (bx + 36, h - 12), (180, 180, 180), 1)
             cv2.putText(frame, k, (bx + 11, h - 22), cv2.FONT_HERSHEY_SIMPLEX, 0.55, txt_col, 2)
 
-        # Camera dropdown menu
-        if self.show_cam_dropdown:
-            self.cam_dropdown_rects.clear()
-            dw = 220
-            dh = len(self.camera_list) * 28 + 10
-            dx = self.ui_buttons.get("cam", (100, 10, 100, 30))[0]
-            dy = 44
-            cv2.rectangle(frame, (dx, dy), (dx + dw, dy + dh), (30, 30, 30), -1)
-            cv2.rectangle(frame, (dx, dy), (dx + dw, dy + dh), (200, 200, 200), 1)
-            for idx, (c_idx, c_name) in enumerate(self.camera_list):
-                iy = dy + 6 + idx * 28
-                rect = (dx + 4, iy, dw - 8, 24)
-                self.cam_dropdown_rects.append((c_idx, rect))
-                if c_idx == self.active_cam_idx:
-                    cv2.rectangle(frame, (rect[0], rect[1]), (rect[0] + rect[2], rect[1] + rect[3]), (0, 160, 60), -1)
-                cv2.putText(frame, f"[{c_idx}] {c_name[:18]}", (dx + 8, iy + 17), cv2.FONT_HERSHEY_SIMPLEX, 0.44, (255, 255, 255), 1)
-
     def run(self):
         cv2.namedWindow(self.window_name)
-        cv2.setMouseCallback(self.window_name, self.on_mouse)
         self.apply_always_on_top()
 
         if not self.start_camera(self.active_cam_idx):
@@ -562,7 +491,7 @@ class BabftWASDController:
         print("Controls:")
         print("  Point FORWARD / UP -> W (Move Forward)")
         print("  Point LEFT         -> A (Steer Left)")
-        print("  Point DOWN         -> S (Move Backward)")
+        print("  Closed FIST        -> S (Move Backward - no pointing down)")
         print("  Point RIGHT        -> D (Steer Right)")
         print("  Rest / Open Hand   -> Neutral (Release all keys)")
         print("\nHotkeys:")
