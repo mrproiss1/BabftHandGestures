@@ -1,9 +1,9 @@
 {
-  "selected_camera_name": "USB2.0 PC CAMERA",
-  "selected_camera_index": 1,
+  "selected_camera_name": "Default Camera",
+  "selected_camera_index": 0,
   "tracked_hand": "both",
-  "sensitivity_x": 0.12,
-  "sensitivity_y": 0.12,
+  "sensitivity_x": 0.08,
+  "sensitivity_y": 0.10,
   "sensitivity_z": 0.08,
   "always_on_top": true,
   "show_gesture_guide": true

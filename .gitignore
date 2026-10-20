@@ -1,8 +1,31 @@
+# Python bytecode & cache
 __pycache__/
-*.pyc
-*.pyo
+*.py[cod]
+*$py.class
 *.pyd
+
+# Environments
 .env
-.venv
+.venv/
 venv/
+ENV/
+env/
+
+# Build & packaging
+dist/
+build/
+*.egg-info/
+*.spec.bak
+
+# Model download temporary files
+*.tmp
+*.download
+
+# OS files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Logs & tests
 *.log
+.pytest_cache/

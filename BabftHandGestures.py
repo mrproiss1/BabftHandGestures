@@ -23,7 +23,8 @@ import json
 import atexit
 import ctypes
 import subprocess
-from ctypes import wintypes
+import urllib.request
+import argparse
 from typing import Dict, List, Tuple, Optional
 
 # --- DEPENDENCIES CHECK ---
@@ -37,6 +38,9 @@ REQUIRED_PACKAGES = [
 def ensure_dependencies():
     missing = []
     for pkg, imp in REQUIRED_PACKAGES:
+        # pygrabber is Windows only
+        if pkg == 'pygrabber' and sys.platform != 'win32':
+            continue
         try:
             __import__(imp)
         except ImportError:
@@ -44,11 +48,12 @@ def ensure_dependencies():
     if missing:
         print(f"Installing missing packages: {missing}")
         try:
-            subprocess.check_call([sys.executable, "-m", "pip", "install", "--disable-pip-version-check"] + missing)
+            subprocess.check_call([sys.executable, "-m", "pip", "install", "--prefer-binary", "--disable-pip-version-check"] + missing)
         except Exception as e:
-            print(f"Failed to install packages: {e}")
+            print(f"Warning: Failed to auto-install some packages: {e}")
 
-ensure_dependencies()
+if "-h" not in sys.argv and "--help" not in sys.argv:
+    ensure_dependencies()
 
 import cv2
 import numpy as np
@@ -68,28 +73,32 @@ try:
 except Exception:
     HAS_PYGRABBER = False
 
-# --- DIRECTINPUT HARDWARE SCANCODES (ROBLOX COMPATIBILITY) ---
-user32 = ctypes.windll.user32
+# --- HARDWARE SCANCODES (ROBLOX DIRECTINPUT COMPATIBILITY) ---
+IS_WINDOWS = (sys.platform == "win32")
 
-class KEYBDINPUT(ctypes.Structure):
-    _fields_ = [
-        ("wVk", wintypes.WORD),
-        ("wScan", wintypes.WORD),
-        ("dwFlags", wintypes.DWORD),
-        ("time", wintypes.DWORD),
-        ("dwExtraInfo", ctypes.c_void_p),
-    ]
+if IS_WINDOWS:
+    from ctypes import wintypes
+    user32 = ctypes.windll.user32
 
-class INPUT(ctypes.Structure):
-    class _I(ctypes.Union):
-        _fields_ = [("ki", KEYBDINPUT)]
-    _anonymous_ = ("i",)
-    _fields_ = [("type", wintypes.DWORD), ("i", _I)]
+    class KEYBDINPUT(ctypes.Structure):
+        _fields_ = [
+            ("wVk", wintypes.WORD),
+            ("wScan", wintypes.WORD),
+            ("dwFlags", wintypes.DWORD),
+            ("time", wintypes.DWORD),
+            ("dwExtraInfo", ctypes.c_void_p),
+        ]
 
-KEYEVENTF_KEYUP = 0x0002
-KEYEVENTF_SCANCODE = 0x0008
+    class INPUT(ctypes.Structure):
+        class _I(ctypes.Union):
+            _fields_ = [("ki", KEYBDINPUT)]
+        _anonymous_ = ("i",)
+        _fields_ = [("type", wintypes.DWORD), ("i", _I)]
 
-# Hardware scancodes for WASD
+    KEYEVENTF_KEYUP = 0x0002
+    KEYEVENTF_SCANCODE = 0x0008
+
+# Hardware scancodes for WASD (Set 1 scancodes recognized by Roblox engine)
 SCANCODE_MAP = {
     'w': 0x11,
     'a': 0x1E,
@@ -100,18 +109,23 @@ SCANCODE_MAP = {
 CURRENTLY_HELD = {'w': False, 'a': False, 's': False, 'd': False}
 
 def send_scancode(key_char: str, is_up: bool = False):
+    if not IS_WINDOWS:
+        return
     sc = SCANCODE_MAP.get(key_char.lower())
     if sc is None:
         return
-    inp = INPUT()
-    inp.type = 1  # INPUT_KEYBOARD
-    flags = KEYEVENTF_SCANCODE | (KEYEVENTF_KEYUP if is_up else 0)
-    inp.ki.wVk = 0
-    inp.ki.wScan = int(sc)
-    inp.ki.dwFlags = int(flags)
-    inp.ki.time = 0
-    inp.ki.dwExtraInfo = None
-    user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(INPUT))
+    try:
+        inp = INPUT()
+        inp.type = 1  # INPUT_KEYBOARD
+        flags = KEYEVENTF_SCANCODE | (KEYEVENTF_KEYUP if is_up else 0)
+        inp.ki.wVk = 0
+        inp.ki.wScan = int(sc)
+        inp.ki.dwFlags = int(flags)
+        inp.ki.time = 0
+        inp.ki.dwExtraInfo = None
+        user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(INPUT))
+    except Exception:
+        pass
 
 def press_key(key: str):
     global CURRENTLY_HELD
@@ -147,7 +161,7 @@ atexit.register(release_all_keys)
 # --- CAMERA ENUMERATION ---
 def get_available_cameras() -> List[Tuple[int, str]]:
     cameras = []
-    if HAS_PYGRABBER:
+    if HAS_PYGRABBER and IS_WINDOWS:
         try:
             graph = FilterGraph()
             devices = graph.get_input_devices()
@@ -159,7 +173,7 @@ def get_available_cameras() -> List[Tuple[int, str]]:
         except Exception:
             pass
 
-    backend = cv2.CAP_DSHOW if sys.platform == "win32" else cv2.CAP_ANY
+    backend = cv2.CAP_DSHOW if IS_WINDOWS else cv2.CAP_ANY
     for idx in range(4):
         cap = cv2.VideoCapture(idx, backend)
         if cap.isOpened():
@@ -172,23 +186,36 @@ def get_available_cameras() -> List[Tuple[int, str]]:
     return cameras
 
 
-# --- CONFIGURATION ---
-def get_resource_path(relative_path: str) -> str:
-    current_dir = os.path.dirname(os.path.abspath(__file__))
-    p = os.path.join(current_dir, relative_path)
-    if os.path.exists(p):
-        return p
-    p2 = os.path.join(current_dir, "..", "HandGunBabft", relative_path)
-    if os.path.exists(p2):
-        return os.path.abspath(p2)
-    return p
+# --- CONFIGURATION & MODEL DOWNLOAD ---
+MODEL_FILENAME = "hand_landmarker.task"
+MODEL_URL = "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task"
+MIN_MODEL_SIZE = 1000000
 
-CONFIG_FILE = get_resource_path("config.json")
-MODEL_FILE = get_resource_path("hand_landmarker.task")
+def get_base_dir() -> str:
+    if getattr(sys, "frozen", False):
+        return os.path.dirname(sys.executable)
+    return os.path.dirname(os.path.abspath(__file__))
+
+CONFIG_FILE = os.path.join(get_base_dir(), "config.json")
+MODEL_FILE = os.path.join(get_base_dir(), MODEL_FILENAME)
+
+def ensure_model_file():
+    if os.path.exists(MODEL_FILE) and os.path.getsize(MODEL_FILE) > MIN_MODEL_SIZE:
+        return
+    print(f"AI Hand Landmarker model not found. Downloading {MODEL_FILENAME}...")
+    try:
+        temp_download = MODEL_FILE + ".tmp"
+        urllib.request.urlretrieve(MODEL_URL, temp_download)
+        if os.path.exists(temp_download) and os.path.getsize(temp_download) > MIN_MODEL_SIZE:
+            os.replace(temp_download, MODEL_FILE)
+            print("Model downloaded successfully.")
+            return
+    except Exception as e:
+        print(f"Warning: Could not download model: {e}")
 
 DEFAULT_CONFIG = {
-    "selected_camera_name": "USB2.0 PC CAMERA",
-    "selected_camera_index": 1,
+    "selected_camera_name": "Default Camera",
+    "selected_camera_index": 0,
     "tracked_hand": "both",
     "sensitivity_x": 0.08,
     "sensitivity_y": 0.10,
@@ -205,6 +232,8 @@ def load_config() -> dict:
                 cfg.update(json.load(f))
         except Exception as e:
             print(f"Config load error: {e}")
+    else:
+        save_config(cfg)
     return cfg
 
 def save_config(cfg: dict):
@@ -221,23 +250,35 @@ def dist2d(p1, p2) -> float:
 
 # --- MAIN WASD CONTROLLER ---
 class BabftWASDController:
-    def __init__(self):
+    def __init__(self, cli_args=None):
+        self.cli_args = cli_args
         self.config = load_config()
-        self.tracked_hand = self.config.get("tracked_hand", "both")
+
+        # Apply CLI overrides if provided
+        if cli_args and cli_args.hand:
+            self.tracked_hand = cli_args.hand
+        else:
+            self.tracked_hand = self.config.get("tracked_hand", "both")
+
         self.always_on_top = bool(self.config.get("always_on_top", True))
         self.show_gesture_guide = bool(self.config.get("show_gesture_guide", True))
-        self.sensitivity_x = float(self.config.get("sensitivity_x", 0.08))
-        self.sensitivity_y = float(self.config.get("sensitivity_y", 0.10))
-        self.sensitivity_z = float(self.config.get("sensitivity_z", 0.08))
+
+        self.sensitivity_x = float(getattr(cli_args, "sensitivity_x", None) or self.config.get("sensitivity_x", 0.08))
+        self.sensitivity_y = float(getattr(cli_args, "sensitivity_y", None) or self.config.get("sensitivity_y", 0.10))
+        self.sensitivity_z = float(getattr(cli_args, "sensitivity_z", None) or self.config.get("sensitivity_z", 0.08))
 
         self.camera_list = get_available_cameras()
-        self.active_cam_idx = self._select_initial_camera()
-        self.cap = None
+        if cli_args and cli_args.camera is not None:
+            self.active_cam_idx = cli_args.camera
+        else:
+            self.active_cam_idx = self._select_initial_camera()
 
+        self.cap = None
         self.current_keys: List[str] = []
         self.active_direction_label = "NEUTRAL"
         self.window_name = "BABFT Hand WASD Controller"
 
+        ensure_model_file()
         if not os.path.exists(MODEL_FILE):
             print(f"Error: Model file {MODEL_FILE} not found!")
             sys.exit(1)
@@ -255,7 +296,7 @@ class BabftWASDController:
 
     def _select_initial_camera(self) -> int:
         saved_name = self.config.get("selected_camera_name", "")
-        saved_idx = self.config.get("selected_camera_index", 1)
+        saved_idx = self.config.get("selected_camera_index", 0)
 
         for idx, name in self.camera_list:
             if saved_name and (saved_name.lower() in name.lower() or name.lower() in saved_name.lower()):
@@ -274,9 +315,22 @@ class BabftWASDController:
             self.cap = None
 
         print(f"Opening camera [{index}]...")
-        self.cap = cv2.VideoCapture(index, cv2.CAP_DSHOW if sys.platform == "win32" else cv2.CAP_ANY)
+        backend = cv2.CAP_DSHOW if IS_WINDOWS else cv2.CAP_ANY
+        self.cap = cv2.VideoCapture(index, backend)
         if not self.cap.isOpened():
             self.cap = cv2.VideoCapture(index)
+
+        # Fallback search if requested index fails
+        if not self.cap.isOpened():
+            for alt_idx in [0, 1, 2]:
+                if alt_idx != index:
+                    print(f"Trying alternative camera [{alt_idx}]...")
+                    self.cap = cv2.VideoCapture(alt_idx, backend)
+                    if not self.cap.isOpened():
+                        self.cap = cv2.VideoCapture(alt_idx)
+                    if self.cap.isOpened():
+                        index = alt_idx
+                        break
 
         if self.cap.isOpened():
             self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
@@ -292,6 +346,8 @@ class BabftWASDController:
         return False
 
     def apply_always_on_top(self):
+        if not IS_WINDOWS:
+            return
         try:
             cv2.setWindowProperty(self.window_name, cv2.WND_PROP_TOPMOST, 1 if self.always_on_top else 0)
             hwnd = user32.FindWindowW(None, self.window_name)
@@ -299,7 +355,7 @@ class BabftWASDController:
                 HWND_TOPMOST = -1 if self.always_on_top else -2
                 user32.SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0, 0x0001 | 0x0002 | 0x0040)
         except Exception as e:
-            print(f"Always-on-top error: {e}")
+            print(f"Always-on-top setting error: {e}")
 
     def get_tracked_hand_landmarks(self, detection_res):
         if not detection_res.hand_landmarks:
@@ -322,7 +378,7 @@ class BabftWASDController:
           - Point FORWARD + RIGHT (WD) -> ['w', 'd']
           - Point LEFT                 -> ['a']
           - Point RIGHT                -> ['d']
-          - Closed FIST (or down)      -> ['s']
+          - Closed FIST                -> ['s']
           - None                       -> [] (Neutral)
         """
         wrist = lm[0]
@@ -337,7 +393,7 @@ class BabftWASDController:
         idx_dz = idx_tip.z - idx_mcp.z
         idx_2d_len = math.hypot(idx_dx, idx_dy) / palm_size
 
-        # 1. Closed FIST detection for Backward (S) - no pointing down needed!
+        # 1. Closed FIST detection for Backward (S)
         if idx_dz > -0.07 and idx_2d_len < 0.35:
             idx_curl = dist2d(idx_tip, wrist) / palm_size
             mid_curl = dist2d(lm[12], wrist) / palm_size
@@ -400,14 +456,14 @@ class BabftWASDController:
     def draw_hud(self, frame: np.ndarray, landmarks, handedness: str, fps: float):
         h, w, _ = frame.shape
 
-        # Clean top bar without visual button clutter
+        # Clean top bar
         overlay = frame.copy()
         cv2.rectangle(overlay, (0, 0), (w, 42), (18, 18, 18), -1)
         cv2.addWeighted(overlay, 0.85, frame, 0.15, 0, frame)
 
         # Simple title and FPS counter
-        cv2.putText(frame, "BUILD A BOAT WASD", (14, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.58, (0, 220, 100), 2)
-        cv2.putText(frame, f"{int(fps)} FPS", (w - 75, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.50, (150, 150, 150), 1)
+        cv2.putText(frame, "BUILD A BOAT WASD", (14, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.58, (0, 220, 100), 2, cv2.LINE_AA)
+        cv2.putText(frame, f"{int(fps)} FPS", (w - 75, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.50, (150, 150, 150), 1, cv2.LINE_AA)
 
         # Skeleton Tracking Lines
         if landmarks:
@@ -422,14 +478,14 @@ class BabftWASDController:
             for p1, p2 in HAND_BONES:
                 pt1 = (int(landmarks[p1].x * w), int(landmarks[p1].y * h))
                 pt2 = (int(landmarks[p2].x * w), int(landmarks[p2].y * h))
-                cv2.line(frame, pt1, pt2, (40, 220, 80), 2)
+                cv2.line(frame, pt1, pt2, (40, 220, 80), 2, cv2.LINE_AA)
 
             for idx, p in enumerate(landmarks):
                 pt = (int(p.x * w), int(p.y * h))
                 if idx == 8:  # Index Tip
-                    cv2.circle(frame, pt, 8, (0, 255, 255), -1)
+                    cv2.circle(frame, pt, 8, (0, 255, 255), -1, cv2.LINE_AA)
                 else:
-                    cv2.circle(frame, pt, 4, (0, 140, 255), -1)
+                    cv2.circle(frame, pt, 4, (0, 140, 255), -1, cv2.LINE_AA)
 
             # Draw Index Aim Vector if pointing
             if any(k in self.current_keys for k in ['w', 'a', 'd']):
@@ -456,11 +512,10 @@ class BabftWASDController:
             cv2.rectangle(card_bg, (gx, gy), (gx + gw, gy + gh), (15, 15, 15), -1)
             cv2.addWeighted(card_bg, 0.80, frame, 0.20, 0, frame)
             cv2.rectangle(frame, (gx, gy), (gx + gw, gy + gh), (70, 70, 70), 1)
-            cv2.putText(frame, "WASD CONTROLS", (gx + 12, gy + 18), cv2.FONT_HERSHEY_SIMPLEX, 0.42, (180, 240, 180), 1)
+            cv2.putText(frame, "WASD CONTROLS", (gx + 12, gy + 18), cv2.FONT_HERSHEY_SIMPLEX, 0.42, (180, 240, 180), 1, cv2.LINE_AA)
 
             for i, (k_tag, pose_desc, act_desc) in enumerate(guide_items):
                 iy = gy + 38 + i * 24
-                # Check if this guide row matches active keys
                 target_match = False
                 if k_tag == "W" and self.current_keys == ['w']:
                     target_match = True
@@ -481,7 +536,7 @@ class BabftWASDController:
                 else:
                     col = (220, 220, 220)
 
-                cv2.putText(frame, f"[{k_tag}] {pose_desc}", (gx + 8, iy), cv2.FONT_HERSHEY_SIMPLEX, 0.36, col, 1)
+                cv2.putText(frame, f"[{k_tag}] {pose_desc}", (gx + 8, iy), cv2.FONT_HERSHEY_SIMPLEX, 0.36, col, 1, cv2.LINE_AA)
 
         # Bottom Bar: Active Gesture and WASD Virtual Keys
         bot_overlay = frame.copy()
@@ -489,9 +544,9 @@ class BabftWASDController:
         cv2.addWeighted(bot_overlay, 0.85, frame, 0.15, 0, frame)
 
         # Status text
-        cv2.putText(frame, f"ACTION: {self.active_direction_label}", (15, h - 22), cv2.FONT_HERSHEY_SIMPLEX, 0.58, (255, 255, 255), 2)
+        cv2.putText(frame, f"ACTION: {self.active_direction_label}", (15, h - 22), cv2.FONT_HERSHEY_SIMPLEX, 0.58, (255, 255, 255), 2, cv2.LINE_AA)
 
-        # WASD Key Badges (Lights up multiple keys when active together)
+        # WASD Key Badges
         wasd_keys = ['W', 'A', 'S', 'D']
         bx = w - 20
         for k in reversed(wasd_keys):
@@ -501,11 +556,13 @@ class BabftWASDController:
             bx -= 45
             cv2.rectangle(frame, (bx, h - 45), (bx + 36, h - 12), bg_col, -1)
             cv2.rectangle(frame, (bx, h - 45), (bx + 36, h - 12), (180, 180, 180), 1)
-            cv2.putText(frame, k, (bx + 11, h - 22), cv2.FONT_HERSHEY_SIMPLEX, 0.55, txt_col, 2)
+            cv2.putText(frame, k, (bx + 11, h - 22), cv2.FONT_HERSHEY_SIMPLEX, 0.55, txt_col, 2, cv2.LINE_AA)
 
     def run(self):
-        cv2.namedWindow(self.window_name)
-        self.apply_always_on_top()
+        headless = bool(self.cli_args and self.cli_args.headless)
+        if not headless:
+            cv2.namedWindow(self.window_name)
+            self.apply_always_on_top()
 
         if not self.start_camera(self.active_cam_idx):
             print("Failed to start camera. Trying default index 0...")
@@ -570,37 +627,51 @@ class BabftWASDController:
                     self.active_direction_label = "NO HAND DETECTED"
                     self.apply_wasd_input([])
 
-                self.draw_hud(frame, landmarks, handedness, fps)
+                if not headless:
+                    self.draw_hud(frame, landmarks, handedness, fps)
+                    cv2.imshow(self.window_name, frame)
+                    key = cv2.waitKey(1) & 0xFF
 
-                cv2.imshow(self.window_name, frame)
-                key = cv2.waitKey(1) & 0xFF
+                    if key in [ord('q'), 27]:
+                        break
+                    elif key == ord('h'):
+                        order = ["both", "right", "left"]
+                        next_idx = (order.index(self.tracked_hand) + 1) % len(order)
+                        self.tracked_hand = order[next_idx]
+                        self.config["tracked_hand"] = self.tracked_hand
+                        save_config(self.config)
+                    elif key == ord('t'):
+                        self.always_on_top = not self.always_on_top
+                        self.config["always_on_top"] = self.always_on_top
+                        save_config(self.config)
+                        self.apply_always_on_top()
+                    elif key == ord('g'):
+                        self.show_gesture_guide = not self.show_gesture_guide
+                        self.config["show_gesture_guide"] = self.show_gesture_guide
+                        save_config(self.config)
 
-                if key in [ord('q'), 27]:
-                    break
-                elif key == ord('h'):
-                    order = ["both", "right", "left"]
-                    next_idx = (order.index(self.tracked_hand) + 1) % len(order)
-                    self.tracked_hand = order[next_idx]
-                    self.config["tracked_hand"] = self.tracked_hand
-                    save_config(self.config)
-                elif key == ord('t'):
-                    self.always_on_top = not self.always_on_top
-                    self.config["always_on_top"] = self.always_on_top
-                    save_config(self.config)
-                    self.apply_always_on_top()
-                elif key == ord('g'):
-                    self.show_gesture_guide = not self.show_gesture_guide
-                    self.config["show_gesture_guide"] = self.show_gesture_guide
-                    save_config(self.config)
-
+        except KeyboardInterrupt:
+            print("\nStopping controller...")
         finally:
             release_all_keys()
             if self.cap is not None:
                 self.cap.release()
             cv2.destroyAllWindows()
-            print("BABFT Controller safely closed.")
+            print("BABFT Controller safely closed. All keys released.")
+
+
+def parse_cli():
+    parser = argparse.ArgumentParser(description="Roblox Build A Boat Hand Gesture WASD Controller")
+    parser.add_argument("--camera", type=int, default=None, help="Camera index to use")
+    parser.add_argument("--hand", choices=["both", "left", "right"], default=None, help="Which hand to track")
+    parser.add_argument("--headless", action="store_true", help="Run in background without opening video window")
+    parser.add_argument("--sensitivity-x", type=float, default=None, help="Horizontal steering sensitivity threshold")
+    parser.add_argument("--sensitivity-y", type=float, default=None, help="Vertical pointing sensitivity threshold")
+    parser.add_argument("--sensitivity-z", type=float, default=None, help="Depth forward pointing sensitivity threshold")
+    return parser.parse_args()
 
 
 if __name__ == "__main__":
-    app = BabftWASDController()
+    args = parse_cli()
+    app = BabftWASDController(cli_args=args)
     app.run()
